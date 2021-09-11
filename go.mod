@@ -1,4 +1,4 @@
-module brk0v/cpager
+module github.com/brk0v/cgtouch
 
 go 1.17
 
