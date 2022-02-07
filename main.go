@@ -148,6 +148,9 @@ func (st *Stats) HandleFile(path string) error {
 		batch = np * pageSize
 
 		mm, err := syscall.Mmap(int(file.Fd()), off, int(batch), syscall.PROT_READ, syscall.MAP_SHARED)
+		if err != nil {
+			return err
+		}
 
 		// disable readahead
 		err = syscall.Madvise(mm, syscall.MADV_RANDOM)
@@ -192,6 +195,11 @@ func (st *Stats) HandleFile(path string) error {
 
 		if int64(n)/PAGEMAP_LENGTH != np {
 			return fmt.Errorf("read data from pagemap is invalid")
+		}
+
+		err = syscall.Munmap(mm)
+		if err != nil {
+			return err
 		}
 
 		data := make([]uint64, len(buf)/SIZEOF_INT64)
@@ -244,8 +252,6 @@ func (st *Stats) HandleFile(path string) error {
 			if debug {
 				fmt.Printf("cgroup memory inode for pfn %x: %d\n", pfn, ci)
 			}
-
-			syscall.Munmap(mm)
 		}
 	}
 
