@@ -139,59 +139,12 @@ func (st *Stats) HandleFile(path string) error {
 	st.Pages += pages
 	st.Size += size
 
-	batch := int64(0)
+	var batch int64
+	var buf []byte
 	for off := int64(0); off < size; off += batch {
-		np := (size - off + pageSize - 1) / pageSize
-		if np > PAGEMAP_BATCH {
-			np = PAGEMAP_BATCH
-		}
-		batch = np * pageSize
-
-		mm, err := syscall.Mmap(int(file.Fd()), off, int(batch), syscall.PROT_READ, syscall.MAP_SHARED)
-
-		// disable readahead
-		err = syscall.Madvise(mm, syscall.MADV_RANDOM)
+		buf, batch, err = st.handleBatch(file, off, size)
 		if err != nil {
 			return err
-		}
-
-		// mincore for finding out pages in page cache
-		mmPtr := uintptr(unsafe.Pointer(&mm[0]))
-
-		mincoreSize := (batch + int64(pageSize) - 1) / int64(pageSize)
-		mincoreVec := make([]byte, mincoreSize)
-
-		batchPtr := uintptr(batch)
-		mincoreVecPtr := uintptr(unsafe.Pointer(&mincoreVec[0]))
-
-		ret, _, err := syscall.Syscall(syscall.SYS_MINCORE, mmPtr, batchPtr, mincoreVecPtr)
-		if ret != 0 {
-			return fmt.Errorf("syscall SYS_MINCORE failed: %v", err)
-		}
-
-		for i, v := range mincoreVec {
-			if v%2 == 1 {
-				// load pages to PTE
-				_ = *(*int)(unsafe.Pointer(mmPtr + uintptr(pageSize*int64(i))))
-			}
-		}
-
-		// reset referenced flags
-		err = syscall.Madvise(mm, syscall.MADV_SEQUENTIAL)
-		if err != nil {
-			return err
-		}
-
-		index := int64(mmPtr) / pageSize * PAGEMAP_LENGTH
-		buf := make([]byte, np*PAGEMAP_LENGTH)
-
-		n, err := st.pagemap.ReadAt(buf, index)
-		if err != nil {
-			return err
-		}
-
-		if int64(n)/PAGEMAP_LENGTH != np {
-			return fmt.Errorf("read data from pagemap is invalid")
 		}
 
 		data := make([]uint64, len(buf)/SIZEOF_INT64)
@@ -244,12 +197,76 @@ func (st *Stats) HandleFile(path string) error {
 			if debug {
 				fmt.Printf("cgroup memory inode for pfn %x: %d\n", pfn, ci)
 			}
-
-			syscall.Munmap(mm)
 		}
 	}
 
 	return err
+}
+
+func (st *Stats) handleBatch(f *os.File, off, size int64) (buf []byte, batch int64, err error) {
+	np := (size - off + pageSize - 1) / pageSize
+	if np > PAGEMAP_BATCH {
+		np = PAGEMAP_BATCH
+	}
+	batch = np * pageSize
+
+	var mm []byte
+	mm, err = syscall.Mmap(int(f.Fd()), off, int(batch), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	defer func() {
+		sErr := syscall.Munmap(mm)
+		if sErr != nil {
+			err = sErr
+		}
+	}()
+
+	// disable readahead
+	err = syscall.Madvise(mm, syscall.MADV_RANDOM)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	defer func() {
+		// reset referenced flags
+		sErr := syscall.Madvise(mm, syscall.MADV_SEQUENTIAL)
+		if sErr != nil {
+			err = sErr
+		}
+	}()
+
+	// mincore for finding out pages in page cache
+	mmPtr := uintptr(unsafe.Pointer(&mm[0]))
+
+	mincoreSize := (batch + int64(pageSize) - 1) / int64(pageSize)
+	mincoreVec := make([]byte, mincoreSize)
+
+	batchPtr := uintptr(batch)
+	mincoreVecPtr := uintptr(unsafe.Pointer(&mincoreVec[0]))
+
+	ret, _, errno := syscall.Syscall(syscall.SYS_MINCORE, mmPtr, batchPtr, mincoreVecPtr)
+	if ret != 0 {
+		return nil, 0, fmt.Errorf("syscall SYS_MINCORE failed: %v", errno)
+	}
+
+	for i, v := range mincoreVec {
+		if v%2 == 1 {
+			// load pages to PTE
+			_ = *(*int)(unsafe.Pointer(mmPtr + uintptr(pageSize*int64(i))))
+		}
+	}
+
+	index := int64(mmPtr) / pageSize * PAGEMAP_LENGTH
+	buf = make([]byte, np*PAGEMAP_LENGTH)
+
+	_, err = st.pagemap.ReadAt(buf, index)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return buf, batch, nil
 }
 
 func (st *Stats) Handle(paths []string, depth uint) {
