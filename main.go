@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -126,7 +125,10 @@ func (st *Stats) HandleFile(path string) error {
 	defer file.Close()
 
 	size := stat.Size()
-	pages := size/pageSize + 1
+	var pages int64
+	if size > 0 {
+		pages = (size-1)/pageSize + 1
+	}
 
 	f := &File{
 		Cgroups: make(Cgroups),
@@ -309,14 +311,14 @@ func (st *Stats) Handle(paths []string, depth uint) {
 			}
 
 			// get file list
-			files, err := ioutil.ReadDir(path)
+			files, err := os.ReadDir(path)
 			if err != nil {
 				st.errs = append(st.errs, err)
 				continue
 			}
 
 			// make new depth step
-			fs := make([]string, 0)
+			fs := make([]string, 0, len(files))
 			for _, file := range files {
 				fs = append(fs, filepath.Join(path, file.Name()))
 			}
@@ -368,19 +370,38 @@ func ByteSize(bytes int64) string {
 func printCgroupStats(cgroups Cgroups, charged uint64, pages int64) {
 	fmt.Printf("%12s%11s%12s%12s\n", "cgroup inode", "percent", "pages", "path")
 
-	fmt.Printf("%12s%10.1f%%%12d        %s\n", "-",
-		float64(uint64(pages)-charged)*100/float64(pages),
-		uint64(pages)-charged,
-		"not charged",
-	)
+	totalPages := uint64(0)
+	if pages > 0 {
+		totalPages = uint64(pages)
+	}
+
+	if totalPages == 0 {
+		fmt.Printf("%12s%10s%12d        %s\n", "-", "n/a", 0, "not charged")
+	} else {
+		effectiveCharged := charged
+		if effectiveCharged > totalPages {
+			effectiveCharged = totalPages
+		}
+		notCharged := totalPages - effectiveCharged
+		percentNotCharged := float64(notCharged) * 100 / float64(totalPages)
+		fmt.Printf("%12s%10.1f%%%12d        %s\n", "-", percentNotCharged, notCharged, "not charged")
+	}
 
 	for _, c := range cgroups {
-		p := float64(c.Charged) * 100 / float64(pages)
 		path, err := ResolvCgroup(c.Inode)
 		pt := path.Path
 		if err != nil {
 			pt = err.Error()
 		}
+		if totalPages == 0 {
+			fmt.Printf("%12d%10s%12d        %s\n", c.Inode, "n/a", c.Charged, pt)
+			continue
+		}
+		chargedPages := c.Charged
+		if chargedPages > totalPages {
+			chargedPages = totalPages
+		}
+		p := float64(chargedPages) * 100 / float64(totalPages)
 		fmt.Printf("%12d%10.1f%%%12d        %s\n", c.Inode, p, c.Charged, pt)
 	}
 }
@@ -388,18 +409,23 @@ func printCgroupStats(cgroups Cgroups, charged uint64, pages int64) {
 // TODO (brk0v): add cache for cgroups
 func ResolvCgroup(inode uint64) (*Cgroup, error) {
 	cg := &Cgroup{}
-	err := filepath.Walk(mount, func(path string, f os.FileInfo, err error) error {
-		if f.IsDir() {
-			var stat syscall.Stat_t
-			if err := syscall.Stat(path, &stat); err != nil {
-				return err
-			}
-			if stat.Ino == inode {
-				cg.Path = path
-				cg.Inode = stat.Ino
-				return nil
-			}
+	err := filepath.Walk(mount, func(path string, f os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
+		if f == nil || !f.IsDir() {
+			return nil
+		}
+		var stat syscall.Stat_t
+		if err := syscall.Stat(path, &stat); err != nil {
+			return err
+		}
+		if stat.Ino == inode {
+			cg.Path = path
+			cg.Inode = stat.Ino
+			return nil
+		}
+
 		return nil
 	})
 	return cg, err
@@ -433,11 +459,15 @@ func main() {
 	}
 
 	// calculate total
-	sc := stat.Charged * PAGE_SIZE
-	if int64(sc) > stat.Size {
-		sc = uint64(stat.Size)
+	totalSize := stat.Size
+	residentBytes := stat.Charged * uint64(pageSize)
+	if totalSize >= 0 && residentBytes > uint64(totalSize) {
+		residentBytes = uint64(totalSize)
 	}
-	percent := float64(sc*100) / float64(stat.Size)
+	var percent float64
+	if totalSize > 0 {
+		percent = float64(residentBytes) * 100 / float64(totalSize)
+	}
 
 	// print total
 	fmt.Printf("%14s: %d\n", "Files", len(stat.Files))
@@ -446,8 +476,8 @@ func main() {
 		"Resident Pages",
 		stat.Charged,
 		stat.Pages,
-		ByteSize(int64(sc)),
-		ByteSize(stat.Size),
+		ByteSize(int64(residentBytes)),
+		ByteSize(totalSize),
 		percent,
 	)
 
