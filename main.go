@@ -161,10 +161,7 @@ func (st *Stats) HandleFile(path string) error {
 		mincoreSize := (batch + int64(pageSize) - 1) / int64(pageSize)
 		mincoreVec := make([]byte, mincoreSize)
 
-		batchPtr := uintptr(batch)
-		mincoreVecPtr := uintptr(unsafe.Pointer(&mincoreVec[0]))
-
-		ret, _, err := syscall.Syscall(syscall.SYS_MINCORE, mmPtr, batchPtr, mincoreVecPtr)
+		ret, _, err := syscall.Syscall(syscall.SYS_MINCORE, mmPtr, uintptr(batch), uintptr(unsafe.Pointer(&mincoreVec[0])))
 		if ret != 0 {
 			return fmt.Errorf("syscall SYS_MINCORE failed: %v", err)
 		}
