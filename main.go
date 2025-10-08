@@ -243,10 +243,7 @@ func (st *Stats) handleBatch(f *os.File, off, size int64) (buf []byte, batch int
 	mincoreSize := (batch + int64(pageSize) - 1) / int64(pageSize)
 	mincoreVec := make([]byte, mincoreSize)
 
-	batchPtr := uintptr(batch)
-	mincoreVecPtr := uintptr(unsafe.Pointer(&mincoreVec[0]))
-
-	ret, _, errno := syscall.Syscall(syscall.SYS_MINCORE, mmPtr, batchPtr, mincoreVecPtr)
+	ret, _, errno := syscall.Syscall(syscall.SYS_MINCORE, mmPtr, uintptr(batch), uintptr(unsafe.Pointer(&mincoreVec[0])))
 	if ret != 0 {
 		return nil, 0, fmt.Errorf("syscall SYS_MINCORE failed: %v", errno)
 	}
